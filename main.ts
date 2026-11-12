@@ -4,14 +4,18 @@ const path = require('node:path');
 const input = process.env.MAKEFUN_INPUT_DIR || '/input';
 const output = process.env.MAKEFUN_OUTPUT_DIR || '/output';
 const task = JSON.parse(fs.readFileSync(path.join(input, 'task.json'), 'utf8'));
-const marks = fs.readFileSync(path.join(input, 'history.ndjson'), 'utf8').trim().split(/\r?\n/).filter(Boolean).map(JSON.parse).filter(m => m.ok && m.rows.length);
+const marks = fs.readFileSync(path.join(input, 'history.ndjson'), 'utf8').trim().split(/\r?\n/).filter(Boolean).map(JSON.parse)
+  .filter(m => m && m.ok && Array.isArray(m.rows) && m.rows.length && Number.isFinite(Date.parse(m.at)));
 if (!marks.length) throw new Error('No ranked observations');
 const last = marks[marks.length - 1];
 const seen = new Map();
 for (const mark of marks) for (const row of mark.rows) {
-  if (!seen.has(row.mint)) seen.set(row.mint, []);
+  if (!row || typeof row.mint !== 'string' || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(row.mint)) continue;
+  if (typeof row.market_cap_lamports !== 'string' || !/^\d+$/.test(row.market_cap_lamports)) continue;
   const cap = Number(row.market_cap_lamports);
-  if (cap > 0 && Number.isFinite(cap)) seen.get(row.mint).push({ t: Date.parse(mark.at), x: Math.log10(cap) - 9, row });
+  if (!(cap > 0 && Number.isFinite(cap))) continue;
+  if (!seen.has(row.mint)) seen.set(row.mint, []);
+  seen.get(row.mint).push({ t: Date.parse(mark.at), x: Math.log10(cap) - 9, row });
 }
 const end = Date.parse(last.at);
 const now = Date.parse(task.history_until);
