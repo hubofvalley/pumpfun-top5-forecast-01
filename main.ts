@@ -66,10 +66,15 @@ const logCap = (value: string | number): number => {
 };
 const clamp = (value: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, value));
 
+// A row with a missing, zero or unparseable market cap is not a ranked quote;
+// keeping it would turn slopes and scores into NaN and poison the whole
+// forecast, so such rows are dropped exactly like a coin never priced.
 const states = new Map<string, Observation[]>();
 for (let index = 0; index <= lastIndex; index += 1) {
   for (const row of marks[index].rows ?? []) {
-    const observation: Observation = { ...row, index, logCap: logCap(row.market_cap_lamports) };
+    const logCapValue = logCap(row.market_cap_lamports);
+    if (!Number.isFinite(logCapValue)) continue;
+    const observation: Observation = { ...row, index, logCap: logCapValue };
     const history = states.get(row.mint) ?? [];
     history.push(observation);
     states.set(row.mint, history);
@@ -96,8 +101,12 @@ for (const [mint, observations] of states) {
   candidates.push({ mint, observations, last, recentSlope, longSlope, trend, predictedLogCap, score });
 }
 
-candidates.sort((a, b) => b.score - a.score || a.mint.localeCompare(b.mint));
-if (candidates.length < task.places) throw new Error('only ' + candidates.length + ' candidates for ' + task.places + ' places');
+// A candidate whose score is not finite (all its rows unusable) must never
+// enter the sort: NaN comparisons leave the order undefined and NaN weights
+// would write probabilities as null, an invalid forecast shape.
+const ranked = candidates.filter((candidate) => Number.isFinite(candidate.score));
+ranked.sort((a, b) => b.score - a.score || a.mint.localeCompare(b.mint));
+if (ranked.length < task.places) throw new Error('only ' + ranked.length + ' candidates for ' + task.places + ' places');
 
 // A longer horizon makes both new entrants and rank reversals more likely. Keep
 // meaningful probability mass unnamed so the scorer can credit that uncertainty.
@@ -106,10 +115,10 @@ const temperature = 0.22 + 0.03 * Math.sqrt(horizonHours);
 const probabilities: Array<{ mint: string; place: number; p: number }> = [];
 for (let place = 1; place <= task.places; place += 1) {
   const sigma = 1.15 + 0.18 * place + 0.035 * horizonHours;
-  const top = candidates.slice(0, Math.min(100, candidates.length));
+  const top = ranked.slice(0, Math.min(100, ranked.length));
   const weights = top.map((candidate, index) => {
     const rankDistance = (index - (place - 1)) / sigma;
-    const scoreWeight = (candidate.score - candidates[0]!.score) / temperature;
+    const scoreWeight = (candidate.score - ranked[0]!.score) / temperature;
     return Math.exp(-0.5 * rankDistance * rankDistance + scoreWeight);
   });
   const total = weights.reduce((sum, value) => sum + value, 0);
@@ -133,8 +142,8 @@ const normalCdf = (x: number, mean: number, sd: number): number =>
 const edges = task.size.edges;
 const sizes: Array<{ place: number; bin: number; p: number }> = [];
 for (let place = 1; place <= task.places; place += 1) {
-  const center = candidates[place - 1]!.predictedLogCap;
-  const neighbour = candidates[place]?.predictedLogCap ?? center;
+  const center = ranked[place - 1]!.predictedLogCap;
+  const neighbour = ranked[place]?.predictedLogCap ?? center;
   const mean = 0.78 * center + 0.22 * neighbour;
   const sd = 0.55 + 0.02 * horizonHours + 0.02 * place;
   const raw: number[] = [];
@@ -150,6 +159,6 @@ for (let place = 1; place <= task.places; place += 1) {
   }
 }
 
-const top5 = candidates.slice(0, task.places).map((candidate) => candidate.mint);
+const top5 = ranked.slice(0, task.places).map((candidate) => candidate.mint);
 const forecast = { probabilities, top5, sizes };
 writeFileSync(join(outputDir, task.output), JSON.stringify(forecast) + '\n');
